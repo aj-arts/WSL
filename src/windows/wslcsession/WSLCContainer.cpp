@@ -679,7 +679,6 @@ void WSLCContainerImpl::CopyTo(IWSLCContainer** Container) const
     THROW_IF_FAILED(m_comWrapper.CopyTo(Container));
 }
 
-
 void WSLCContainerImpl::Attach(LPCSTR DetachKeys, WSLCHandle* Stdin, WSLCHandle* Stdout, WSLCHandle* Stderr) const
 {
     auto lock = m_lock.lock_shared();
@@ -2235,7 +2234,6 @@ ULONG STDMETHODCALLTYPE WSLCContainer::Release()
 
     return count;
 }
-
 
 HRESULT WSLCContainer::Attach(LPCSTR DetachKeys, WSLCHandle* Stdin, WSLCHandle* Stdout, WSLCHandle* Stderr)
 {
