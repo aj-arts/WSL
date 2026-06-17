@@ -2300,6 +2300,10 @@ HRESULT WSLCContainer::Stop(_In_ WSLCSignal Signal, _In_ LONG TimeoutSeconds)
 {
     WSLCExecutionContext context(&m_session);
 
+    // Hold a VM lease for the whole operation: --rm containers self-delete during Stop, which
+    // disconnects the wrapper and drops activity. Without the lease, the idle worker can fire
+    // during the post-stop destroy wait (up to 60s) and tear the VM down mid-call.
+    auto vmLease = m_session.AcquireVmLease();
     return CallImpl(&WSLCContainerImpl::Stop, Signal, TimeoutSeconds, false);
 }
 
@@ -2307,6 +2311,8 @@ HRESULT WSLCContainer::Kill(_In_ WSLCSignal Signal)
 {
     WSLCExecutionContext context(&m_session);
 
+    // Hold a VM lease for the same reason as Stop(): --rm can self-delete and drop activity.
+    auto vmLease = m_session.AcquireVmLease();
     return CallImpl(&WSLCContainerImpl::Stop, Signal, {}, true);
 }
 
