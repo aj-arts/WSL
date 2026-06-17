@@ -17,6 +17,7 @@ Abstract:
 #include "wslc.h"
 #include "WSLCVirtualMachine.h"
 #include "WSLCContainer.h"
+#include "WSLCIdleState.h"
 #include "WSLCVolumes.h"
 #include "WSLCNetworkMetadata.h"
 #include "DockerEventTracker.h"
@@ -246,19 +247,6 @@ public:
     // processes).
     Microsoft::WRL::ComPtr<IUnknown> CreateActivityToken();
 
-    // Idle-activity state shared between the session and any outstanding activity tokens. Held via
-    // shared_ptr so a token (or a container COM wrapper) can outlive the session (e.g. a client
-    // keeps a root-namespace process or container proxy past releasing the session) and still
-    // safely release its activity reference / wake the idle worker without keeping the session
-    // object alive. Tearing down the session therefore proceeds normally; a late token release
-    // simply decrements the count and signals an event with no waiter. Public so the container COM
-    // wrapper (WSLCContainer) can hold a shared_ptr to it; see WSLCContainer::Release().
-    struct IdleState
-    {
-        std::atomic<int> ActivityCount{0};
-        wil::unique_event IdleCheckEvent{wil::EventOptions::ManualReset};
-    };
-
 private:
     ULONG m_id = 0;
 
@@ -391,7 +379,9 @@ private:
     // Number of times the VM has been (re)created; surfaced via GetVmDiagnostics.
     std::atomic<ULONG> m_vmStartCount{0};
     // In-flight activity count and idle-worker wake event, decoupled from this object's lifetime
-    // (see IdleState) so activity tokens never extend the session's lifetime.
+    // (see IdleState in WSLCIdleState.h) so activity tokens and container COM wrappers can safely
+    // manage activity without keeping the session alive. See WSLCContainer::AddRef/Release and
+    // CreateActivityToken().
     std::shared_ptr<IdleState> m_idleState{std::make_shared<IdleState>()};
     std::thread m_idleThread;
 

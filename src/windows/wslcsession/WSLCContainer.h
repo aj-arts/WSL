@@ -16,6 +16,7 @@ Abstract:
 
 #include "ServiceProcessLauncher.h"
 #include "WSLCSession.h"
+#include "WSLCIdleState.h"
 #include "DockerEventTracker.h"
 #include "DockerHTTPClient.h"
 #include "WSLCProcessControl.h"
@@ -111,12 +112,6 @@ public:
     void DisconnectFromNetwork(LPCSTR NetworkName);
 
     void CopyTo(IWSLCContainer** Container) const;
-
-    // Returns true if a client still holds a reference to this container's COM wrapper (i.e. the
-    // wrapper's reference count exceeds the single reference owned internally by the impl). Used by
-    // the idle worker so the VM is not torn down out from under an outstanding container proxy,
-    // which would otherwise leave the client with RPC_E_DISCONNECTED.
-    bool IsExternallyReferenced() const noexcept;
 
     const std::string& Image() const noexcept;
     const std::string& Name() const noexcept;
@@ -260,20 +255,15 @@ public:
 
     IFACEMETHOD(InterfaceSupportsErrorInfo)(REFIID riid);
 
-    // RuntimeClass reference-count override. When a client releases its last proxy (leaving only the
-    // single internal reference owned by WSLCContainerImpl::m_comWrapper), wake the idle worker so
-    // the VM can be reclaimed. This pairs with WSLCContainerImpl::IsExternallyReferenced(), which
-    // keeps the VM alive while a client still holds a container proxy; without this signal the idle
-    // worker would never re-evaluate after the proxy was released and the VM would stay up forever.
-    // The wake is delivered through the captured m_idleState (not m_session) so it stays safe even
-    // if the wrapper outlives the session or is concurrently destroyed once our reference drops.
+    // RuntimeClass reference-count overrides. When a client takes its first external reference
+    // (transitioning from refcount=1 to refcount=2), AddRef() increments the session's activity
+    // count to prevent idle teardown. When the client releases its last proxy (2→1 transition),
+    // Release() decrements the activity count and wakes the idle worker. This replaces external-
+    // reference polling with direct tracking. The activity management goes through m_idleState
+    // (not m_session) so it stays safe even if the wrapper outlives the session or is concurrently
+    // destroyed once the reference drops.
+    ULONG STDMETHODCALLTYPE AddRef() override;
     ULONG STDMETHODCALLTYPE Release() override;
-
-    // Returns true if a client still holds a reference to this wrapper, i.e. the reference count
-    // exceeds the single internal reference owned by WSLCContainerImpl::m_comWrapper. Reads the
-    // count via an AddRef + base Release round-trip that deliberately bypasses the Release() override
-    // above, so querying does not itself wake the idle worker.
-    bool HasExternalReference() noexcept;
 
     // Cache read-only properties so they remain accessible after the impl is disconnected.
     // Called from WSLCContainerImpl::PrepareDisconnectComWrapper() while m_lock is held exclusively.
@@ -283,13 +273,13 @@ private:
     WSLCSession& m_session;
     std::function<void(const WSLCContainerImpl*)> m_onDeleted;
 
-    // Wakes the idle worker when the last client proxy is released (see Release()). Bound at
-    // construction to a lambda that captures the session's shared idle state (WSLCSession::IdleState
-    // held via shared_ptr), so signalling never dereferences m_session: the wrapper can outlive the
-    // session (a client keeps this proxy past releasing the session) and can be concurrently
-    // destroyed the instant Release() drops our reference. The captured shared_ptr keeps the idle
-    // state alive and valid in both cases.
-    std::function<void()> m_requestIdleCheck;
+    // Shared idle state for activity-count tracking and idle-check signaling. Captured at
+    // construction from the session's m_idleState (held via shared_ptr), so AddRef/Release can
+    // safely increment/decrement the activity count without dereferencing m_session: the wrapper
+    // can outlive the session (a client keeps this proxy past releasing the session) and can be
+    // concurrently destroyed the instant Release() drops the reference. The captured shared_ptr
+    // keeps the idle state alive and valid in both cases.
+    std::shared_ptr<wsl::windows::service::wslc::IdleState> m_idleState;
 
     // Cached read-only properties populated by CacheState() so they remain
     // accessible after the impl is disconnected.
