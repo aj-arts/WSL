@@ -2183,6 +2183,12 @@ WSLCContainer::WSLCContainer(WSLCContainerImpl* impl, WSLCSession& session, std:
 
 ULONG STDMETHODCALLTYPE WSLCContainer::AddRef()
 {
+    // Lock protects the invariant that the COM refcount transition and ActivityCount increment
+    // happen atomically together. Without this lock, a concurrent Release can decrement
+    // ActivityCount after we increment the refcount but before we increment ActivityCount,
+    // causing underflow.
+    auto lock = m_idleState->ActivityLock.lock_exclusive();
+
     const ULONG previousCount = RuntimeClassBase::AddRef() - 1;
 
     // A 1→2 transition means a client just took its first external reference (the impl's
@@ -2198,24 +2204,32 @@ ULONG STDMETHODCALLTYPE WSLCContainer::AddRef()
 
 ULONG STDMETHODCALLTYPE WSLCContainer::Release()
 {
-    // Snapshot the idle state on the stack BEFORE dropping our reference. Once Release() returns,
+    // Snapshot the idle state on the stack BEFORE acquiring the lock. Once Release() returns,
     // this object may already be gone: a concurrent owner of the last remaining reference (e.g.
     // container deletion releasing WSLCContainerImpl::m_comWrapper) can destroy it, and the session
     // itself may be torn down while a client still holds this proxy. The captured shared_ptr keeps
     // the state valid in both cases, so we never touch a member after Release().
     const std::shared_ptr<IdleState> idleState = m_idleState;
 
+    // Lock protects the invariant that the COM refcount transition and ActivityCount decrement
+    // happen atomically together. Without this lock, a concurrent AddRef can increment the refcount
+    // after we decrement it but before we decrement ActivityCount, causing underflow when the
+    // AddRef completes and increments ActivityCount while we're about to decrement it from 0.
+    auto lock = idleState->ActivityLock.lock_exclusive();
+
     const ULONG count = RuntimeClassBase::Release();
 
     // A 2→1 transition means the client just released its last external reference (leaving only
-    // the internal reference owned by WSLCContainerImpl::m_comWrapper). Decrement the activity
-    // count and wake the idle worker so the now-idle VM can be reclaimed. N.B. at count 0 the
+    // the internal reference owned by WSLCContainerImpl::m_comWrapper), OR the internal reference
+    // was released during cleanup (m_comWrapper is already null, client's proxy is at refcount=1
+    // but disconnected). In both cases, decrementing activity is correct: the container is either
+    // about to be destroyed or already disconnected from its implementation. N.B. at count 0 the
     // object has already been destroyed; we deliberately operate only through the stack-local
     // snapshot, never a member, on any post-Release path.
     if (count == 1 && idleState)
     {
         const int previousActivity = idleState->ActivityCount.fetch_sub(1);
-        WI_ASSERT(previousActivity > 0);
+        FAIL_FAST_IF(previousActivity <= 0); // Underflow is a fatal bug, not a recoverable condition
         idleState->IdleCheckEvent.SetEvent();
     }
 

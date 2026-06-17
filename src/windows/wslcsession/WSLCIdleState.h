@@ -28,6 +28,12 @@ struct IdleState
 {
     std::atomic<int> ActivityCount{0};
     wil::unique_event IdleCheckEvent{wil::EventOptions::ManualReset};
+    
+    // Protects the invariant that COM refcount transitions (1→2, 2→1) and ActivityCount
+    // increments/decrements happen atomically together in WSLCContainer::AddRef/Release.
+    // Without this lock, concurrent AddRef and Release can interleave such that Release
+    // decrements ActivityCount before AddRef increments it, causing underflow.
+    wil::srwlock ActivityLock;
 };
 
 } // namespace wsl::windows::service::wslc
