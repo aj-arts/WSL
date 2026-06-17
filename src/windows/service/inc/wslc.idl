@@ -93,23 +93,23 @@ typedef enum _WSLCSignal
     WSLCSignalSIGSYS = 31
 } WSLCSignal;
 
-[ uuid(8C5A7B14 - 9D26 - 4FAE-AB31 - 7E5BC23F4801), pointer_default(unique), object ] interface ICrashDumpCallback : IUnknown
+[ uuid(8C5A7B14-9D26-4FAE-AB31-7E5BC23F4801), pointer_default(unique), object ] interface ICrashDumpCallback : IUnknown
 {
     HRESULT OnCrashDump(
         [ in, string ] LPCWSTR DumpPath, [ in, unique, string ] LPCSTR ProcessName, [in] ULONGLONG Pid, [in] ULONG Signal, [in] ULONGLONG Timestamp);
 };
 
-[ uuid(5038842F - 53DB - 4F30 - A6D0 - A41B02C94AC1), pointer_default(unique), object ] interface IProgressCallback : IUnknown
+[ uuid(5038842F-53DB-4F30-A6D0-A41B02C94AC1), pointer_default(unique), object ] interface IProgressCallback : IUnknown
 {
     HRESULT OnProgress(LPCSTR Status, LPCSTR Id, ULONGLONG Current, ULONGLONG Total);
 };
 
-[ uuid(8153ED5D - 8ABB - 408B - ADBE - C0F3B13E07C3), pointer_default(unique), object ] interface IWarningCallback : IUnknown
+[ uuid(8153ED5D-8ABB-408B-ADBE-C0F3B13E07C3), pointer_default(unique), object ] interface IWarningCallback : IUnknown
 {
     HRESULT OnWarning([ in, string ] LPCWSTR Message);
 };
 
-[ uuid(F3E6D5B2 - 1D40 - 4E8B - 9C39 - 7A45D1C0F8A2), pointer_default(unique), object ] interface IWSLCPluginNotifier : IUnknown
+[ uuid(F3E6D5B2-1D40-4E8B-9C39-7A45D1C0F8A2), pointer_default(unique), object ] interface IWSLCPluginNotifier : IUnknown
 {
     // 'InspectJson' follows the wslc_schema::InspectContainer format.
     // Returning failure prevents the container creation.
@@ -387,7 +387,7 @@ typedef enum _WSLCProcessState
     WslcProcessStateSignalled = 3
 } WSLCProcessState;
 
-[ uuid(1AD163CD - 393D - 4B33 - 83A2 - 8A3F3F23E608), pointer_default(unique), object ] interface IWSLCProcess : IUnknown
+[ uuid(1AD163CD-393D-4B33-83A2-8A3F3F23E608), pointer_default(unique), object ] interface IWSLCProcess : IUnknown
 {
     HRESULT Signal([in] int Signal);
     HRESULT GetExitEvent([ out, system_handle(sh_event) ] HANDLE * EventHandle);
@@ -439,11 +439,11 @@ cpp_quote(
 } WSLCGuestCapabilities;
 
 //
-// IWSLCVirtualMachine - Interface representing a single VM instance.
+// IWSLCVirtualMachine-Interface representing a single VM instance.
 // Operations are scoped to this VM. The VM ID is stored internally,
 // so only the holder of this interface can operate on the VM.
 //
-[ uuid(B5E2D8F1 - 9A3C - 4E6B - 8D1F - 7C4A2E9B6D3A), pointer_default(unique), object ] interface IWSLCVirtualMachine : IUnknown
+[ uuid(B5E2D8F1-9A3C-4E6B-8D1F-7C4A2E9B6D3A), pointer_default(unique), object ] interface IWSLCVirtualMachine : IUnknown
 {
     // Gets the VM ID.
     HRESULT GetId([ out, retval ] GUID * VmId);
@@ -489,7 +489,7 @@ cpp_quote(
 }
 
 //
-// IWSLCVirtualMachineFactory - Creates VMs on demand for a session.
+// IWSLCVirtualMachineFactory-Creates VMs on demand for a session.
 //
 // Held by the per-user session process and implemented by the SYSTEM service.
 // This lets the session create a fresh VM at any time (e.g. to recreate a VM that
@@ -497,7 +497,7 @@ cpp_quote(
 // eagerly creating a single VM up front. Each successful call returns a new VM whose
 // lifetime is owned by the caller: releasing the IWSLCVirtualMachine tears it down.
 //
-[ uuid(2E3C9A41 - 7D58 - 4B6E-9F12 - 6C4A2E9B6D3B), pointer_default(unique), object ] interface IWSLCVirtualMachineFactory : IUnknown
+[ uuid(2E3C9A41-7D58-4B6E-9F12-6C4A2E9B6D3B), pointer_default(unique), object ] interface IWSLCVirtualMachineFactory : IUnknown
 {
     // Creates a new VM using the settings captured at session creation time.
     HRESULT CreateVirtualMachine([out] IWSLCVirtualMachine * *Vm);
@@ -512,7 +512,7 @@ typedef enum _WSLCSessionStorageFlags
 
 cpp_quote("DEFINE_ENUM_FLAG_OPERATORS(WSLCSessionStorageFlags);")
 
-    // Settings for IWSLCSessionManager::CreateSession - full session configuration
+    // Settings for IWSLCSessionManager::CreateSession-full session configuration
     typedef struct _WSLCSessionSettings
 {
     LPCWSTR DisplayName;
@@ -553,7 +553,7 @@ cpp_quote("#define WSLCDeleteFlagsValid (WSLCDeleteFlagsForce | WSLCDeleteFlagsD
 
     cpp_quote("DEFINE_ENUM_FLAG_OPERATORS(WSLCDeleteFlags);")
 
-        [uuid(7577FE8D - DE85 - 471E-B870 - 11669986F332), pointer_default(unique), object] interface IWSLCContainer : IUnknown
+        [uuid(7577FE8D-DE85-471E-B870-11669986F332), pointer_default(unique), object] interface IWSLCContainer : IUnknown
 {
     HRESULT Attach([ in, unique ] LPCSTR DetachKeys, [out] WSLCHandle * StdIn, [out] WSLCHandle * StdOut, [out] WSLCHandle * StdErr);
     HRESULT Stop([in] WSLCSignal Signal, [in] LONG TimeoutSeconds);
@@ -705,7 +705,7 @@ typedef enum _WSLCSessionState
     WSLCSessionStateTerminated = 1
 } WSLCSessionState;
 
-// Settings for IWSLCSession::Initialize - passed from service to per-user process
+// Settings for IWSLCSession::Initialize-passed from service to per-user process
 typedef struct _WSLCSessionInitSettings
 {
     ULONG SessionId;
@@ -721,7 +721,7 @@ typedef struct _WSLCSessionInitSettings
     [unique] LPCSTR RootVhdTypeOverride;
 } WSLCSessionInitSettings;
 
-[ uuid(EF0661E4 - 6364 - 40EA - B433 - E2FDF11F3519), pointer_default(unique), object ] interface IWSLCSession : IUnknown
+[ uuid(EF0661E4-6364-40EA-B433-E2FDF11F3519), pointer_default(unique), object ] interface IWSLCSession : IUnknown
 {
     HRESULT GetId([out] ULONG * Id);
     HRESULT GetState([out] WSLCSessionState * State);
@@ -816,7 +816,7 @@ typedef struct _WSLCSessionInitSettings
     HRESULT MapVmPort([in] int Family, [in] unsigned short WindowsPort, [in] unsigned short LinuxPort);
     HRESULT UnmapVmPort([in] int Family, [in] unsigned short WindowsPort, [in] unsigned short LinuxPort);
 
-    // Session initialization - called by SYSTEM service after launching per-user process.
+    // Session initialization-called by SYSTEM service after launching per-user process.
     // Returns a handle to this COM server process (used to add to job object).
     HRESULT GetProcessHandle([ out, system_handle(sh_process) ] HANDLE * ProcessHandle);
 
@@ -866,11 +866,11 @@ typedef struct _WSLCSessionInitSettings
 }
 
 //
-// IWSLCSessionReference - Weak reference to a session held by the SYSTEM service.
+// IWSLCSessionReference-Weak reference to a session held by the SYSTEM service.
 // Stored in per-user process, allows service to check liveness and terminate sessions.
 // Session metadata (ID, name, etc.) is stored service-side in SessionEntry.
 //
-[ uuid(B3A72F48 - 9D15 - 4E8A - A621 - 7C3E84F09B52), pointer_default(unique), object ] interface IWSLCSessionReference : IUnknown
+[ uuid(B3A72F48-9D15-4E8A-A621-7C3E84F09B52), pointer_default(unique), object ] interface IWSLCSessionReference : IUnknown
 {
     // Try to open the session. Fails if session was released or terminated.
     // Returns S_OK and a valid session if still alive.
@@ -881,10 +881,10 @@ typedef struct _WSLCSessionInitSettings
 }
 
 //
-// IWSLCSessionFactory - Creates sessions in the per-user COM server process.
+// IWSLCSessionFactory-Creates sessions in the per-user COM server process.
 // Called by the SYSTEM service via CoCreateInstanceAsUser.
 //
-[ uuid(C4E8F291 - 3B5D - 4A7C - 9E12 - 8F6A4D2B7C91), pointer_default(unique), object ] interface IWSLCSessionFactory : IUnknown
+[ uuid(C4E8F291-3B5D-4A7C-9E12-8F6A4D2B7C91), pointer_default(unique), object ] interface IWSLCSessionFactory : IUnknown
 {
     // Creates a new session and returns both the session interface and a service reference.
     HRESULT CreateSession(
@@ -917,7 +917,7 @@ typedef enum _WSLCSessionFlags
 cpp_quote("#define WSLCSessionFlagsValid (WSLCSessionFlagsPersistent | WSLCSessionFlagsOpenExisting)")
     cpp_quote("DEFINE_ENUM_FLAG_OPERATORS(WSLCSessionFlags);")
 
-        [uuid(82A7ABC8 - 6B50 - 43FC - AB96 - 15FBBE7E8760), pointer_default(unique), object] interface IWSLCSessionManager : IUnknown
+        [uuid(82A7ABC8-6B50-43FC-AB96-15FBBE7E8760), pointer_default(unique), object] interface IWSLCSessionManager : IUnknown
 {
     HRESULT GetVersion([out] WSLCVersion * Version);
     HRESULT IsClientVersionSupported([in] const WSLCVersion* ClientVersion, [out] BOOL* IsSupported);
