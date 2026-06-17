@@ -255,13 +255,9 @@ public:
 
     IFACEMETHOD(InterfaceSupportsErrorInfo)(REFIID riid);
 
-    // RuntimeClass reference-count overrides. When a client takes its first external reference
-    // (transitioning from refcount=1 to refcount=2), AddRef() increments the session's activity
-    // count to prevent idle teardown. When the client releases its last proxy (2→1 transition),
-    // Release() decrements the activity count and wakes the idle worker. This replaces external-
-    // reference polling with direct tracking. The activity management goes through m_idleState
-    // (not m_session) so it stays safe even if the wrapper outlives the session or is concurrently
-    // destroyed once the reference drops.
+    // RuntimeClass reference-count overrides for activity tracking. On 1→2 refcount transition
+    // (client takes first reference), increments session activity to prevent idle teardown. On
+    // 2→1 transition (client releases), decrements activity and wakes idle worker.
     ULONG STDMETHODCALLTYPE AddRef() override;
     ULONG STDMETHODCALLTYPE Release() override;
 
@@ -273,12 +269,8 @@ private:
     WSLCSession& m_session;
     std::function<void(const WSLCContainerImpl*)> m_onDeleted;
 
-    // Shared idle state for activity-count tracking and idle-check signaling. Captured at
-    // construction from the session's m_idleState (held via shared_ptr), so AddRef/Release can
-    // safely increment/decrement the activity count without dereferencing m_session: the wrapper
-    // can outlive the session (a client keeps this proxy past releasing the session) and can be
-    // concurrently destroyed the instant Release() drops the reference. The captured shared_ptr
-    // keeps the idle state alive and valid in both cases.
+    // Shared idle state captured from session at construction. Lets AddRef/Release manage activity
+    // without dereferencing m_session (safe even if wrapper outlives session).
     std::shared_ptr<wsl::windows::service::wslc::IdleState> m_idleState;
 
     // Cached read-only properties populated by CacheState() so they remain

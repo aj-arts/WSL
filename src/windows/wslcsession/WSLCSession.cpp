@@ -640,15 +640,8 @@ void WSLCSession::TearDownVmLockHeld(bool CaptureTerminationReason)
     m_containerdProcess.reset();
     m_virtualMachine.reset();
 
-    // Destroy the (stopped) relay so the next StartVm can create a fresh one.
-    //
-    // N.B. The relay must NOT be destroyed from its own thread: ~IORelay joins the relay
-    // thread, and joining a thread from itself calls std::terminate(). This situation arises
-    // on the unexpected-VM-exit path, where OnVmExited() runs on the relay thread and drives
-    // Terminate() -> TearDownVmLockHeld(). In that (terminal) case the stopped relay and the
-    // VM-exit event it watches are left in place and destroyed later by ~WSLCSession on a
-    // different thread. On the idle-stop and external-terminate paths this runs on a non-relay
-    // thread, so both are destroyed here. (StartVmLockHeld resets m_vmExitedEvent before reuse.)
+    // Destroy the relay unless we're on its own thread (~IORelay joins the thread, which would
+    // deadlock). On unexpected-VM-exit path (runs on relay thread), leave it for ~WSLCSession.
     if (!m_ioRelay || !m_ioRelay->IsRelayThread())
     {
         m_ioRelay.reset();
@@ -667,10 +660,8 @@ bool WSLCSession::HasActiveContainerLockHeld()
 {
     std::lock_guard containersLock(m_containersLock);
 
-    // A container in the Created or Running state keeps the VM alive (it is non-terminal and may
-    // still be started/used). Exited containers do not. External references to container proxies
-    // now increment the activity count directly (via WSLCContainer::AddRef/Release), so we no
-    // longer need to scan for externally-referenced Exited containers here.
+    // Created/Running containers keep VM alive. Exited containers don't. External refs now
+    // tracked via WSLCContainer::AddRef/Release, so no need to scan Exited containers.
     return std::ranges::any_of(m_containers, [](const auto& entry) {
         const auto state = entry.second->State();
         return state == WslcContainerStateCreated || state == WslcContainerStateRunning;
@@ -742,13 +733,8 @@ void WSLCSession::IdleWorker()
 
         try
         {
-            // Use a non-blocking acquire. A blocking exclusive acquire would queue behind any
-            // in-flight operation's shared VmLease and, because SRW locks favor a waiting writer,
-            // would stall every new operation behind it until that operation completed. A
-            // long-running operation (e.g. a blocking SaveImage/Export) would therefore serialize
-            // all concurrent operations. If the lock is currently held an operation is in flight,
-            // so treat it as activity and re-evaluate on the next idle-check signal (raised when
-            // that operation releases its lease).
+            // Non-blocking acquire: a blocking exclusive would queue behind in-flight operations,
+            // and SRW locks favor waiting writers, stalling all new ops. If held, treat as active.
             auto lock = m_lock.try_lock_exclusive();
             if (!lock)
             {
@@ -761,12 +747,9 @@ void WSLCSession::IdleWorker()
                 continue;
             }
 
-            // If the VM's exit event is already signaled, the VM has crashed and OnVmExited()
-            // (running on the IO relay thread) is about to drive Terminate(). Do NOT tear the VM
-            // down here: StopVmLockHeld() would join the relay thread while this exclusive lock is
-            // held, and the relay thread can be simultaneously blocked acquiring that same lock
-            // inside Terminate()'s retry loop — a deadlock. Leave crash handling to the relay-thread
-            // path, whose Stop() self-join is a no-op and therefore cannot deadlock.
+            // If VM already crashed, OnVmExited() on relay thread is about to drive Terminate().
+            // Don't teardown here: StopVmLockHeld() joins relay thread, which may be blocked in
+            // Terminate() trying to acquire this exclusive lock. Leave crashes to relay thread.
             if (m_vmExitedEvent && m_vmExitedEvent.is_signaled())
             {
                 idleDeadline.reset();
@@ -819,12 +802,7 @@ WSLCSession::VmLease::VmLease(WSLCSession& Session) : m_session(&Session)
         m_session = nullptr;
     });
 
-    // The idle worker may complete a teardown in the window between EnsureVmRunning() and our
-    // shared-lock acquisition (it could have committed to the stop before our activity-count
-    // increment was visible). Our increment prevents any *future* idle teardown, so retry until
-    // we hold the shared lock with the VM running. This is bounded: once the increment is visible
-    // the idle worker will not stop the VM again, so at most one restart is needed.
-    // N.B. EnsureVmRunning() throws if the session has been terminated, which breaks the loop.
+    // Activity increment may race with idle teardown. Retry until we hold the lock with VM running.
     for (;;)
     {
         m_session->EnsureVmRunning();
@@ -1010,9 +988,7 @@ void WSLCSession::OnContainerdExited()
 
 void WSLCSession::OnVmExited()
 {
-    // A teardown we initiated (idle shutdown) is in progress — the VM exit is expected and
-    // must not terminate the session. N.B. This runs on the IO relay thread; the flag is set
-    // under the exclusive lock before the relay is stopped, so it is visible here.
+    // Idle shutdown is in progress, VM exit is expected. Don't terminate session.
     if (m_vmStopRequested.load())
     {
         WSL_LOG("WslcVmExitedDuringStop", TraceLoggingValue(m_id, "SessionId"));
@@ -2431,20 +2407,13 @@ CATCH_RETURN();
 
 namespace {
 
-    // Activity token created by WSLCSession::CreateActivityToken (returned directly by
-    // BeginContainerOperation, and bound to a root-namespace process's lifetime by
-    // CreateRootNamespaceProcess). While a client holds it, the session's activity count is
-    // non-zero, so the idle worker will not tear the VM down. It runs a release callback (which
-    // decrements the activity count via the shared IdleState, without keeping the session alive)
-    // when the client releases it or exits. It implements IFastRundown so that if the holding
-    // client crashes, COM reclaims the stub promptly (rather than via slow default rundown) and the
-    // VM can idle-terminate without a multi-minute delay.
+    // Activity token holds an activity reference to prevent idle VM teardown while client holds it.
+    // Implements IFastRundown so crashed clients reclaim stub promptly instead of slow default rundown.
     class ContainerOperation
         : public Microsoft::WRL::RuntimeClass<Microsoft::WRL::RuntimeClassFlags<Microsoft::WRL::ClassicCom>, IUnknown, IFastRundown>
     {
     public:
-        // Adopts an activity-count reference already taken by CreateActivityToken; the callback
-        // releases it.
+        // Adopts an activity reference from CreateActivityToken; callback releases it.
         void Initialize(std::function<void()>&& onRelease) noexcept
         {
             m_onRelease = std::move(onRelease);
@@ -2477,11 +2446,7 @@ Microsoft::WRL::ComPtr<IUnknown> WSLCSession::CreateActivityToken()
     auto operation = Microsoft::WRL::Make<ContainerOperation>();
     THROW_IF_NULL_ALLOC(operation.Get());
 
-    // Capture the shared idle state rather than the session itself: the token may outlive the
-    // session (e.g. a client keeps a root-namespace process proxy past releasing the session), and
-    // it must not keep the session alive. On release it decrements the activity count and wakes the
-    // idle worker; if the session is already gone this is a harmless no-op (no idle worker waits on
-    // the event). N.B. releasing the token therefore never blocks an explicit session teardown.
+    // Capture shared idle state so token can outlive session and release activity without keeping session alive.
     std::shared_ptr<IdleState> idleState = m_idleState;
     operation->Initialize([idleState = std::move(idleState)]() {
         idleState->ActivityCount.fetch_sub(1);
