@@ -535,7 +535,6 @@ void WSLCSession::StartVmLockHeld()
     RecoverExistingContainers();
 
     m_vmState.store(VmState::Running);
-    m_vmStartCount.fetch_add(1);
     startCleanup.release();
 
     WSL_LOG("WslcVmStarted", TraceLoggingValue(m_id, "SessionId"));
@@ -3686,17 +3685,6 @@ try
     return S_OK;
 }
 CATCH_RETURN();
-
-HRESULT WSLCSession::GetVmDiagnostics(_Out_ WSLCVmDiagnostics* Diagnostics)
-{
-    RETURN_HR_IF_NULL(E_POINTER, Diagnostics);
-
-    // Reads atomics only: this must not acquire a VM lease or otherwise bring the VM up,
-    // so callers can observe idle termination without keeping the VM alive.
-    Diagnostics->Running = m_vmState.load() == VmState::Running;
-    Diagnostics->StartCount = m_vmStartCount.load();
-    return S_OK;
-}
 
 void WSLCSession::RecoverExistingContainers()
 {

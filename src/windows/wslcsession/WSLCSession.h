@@ -109,7 +109,6 @@ public:
     IFACEMETHOD(GetState)(_Out_ WSLCSessionState* State) override;
     IFACEMETHOD(GetTerminationEvent)(_Out_ HANDLE* Event) override;
     IFACEMETHOD(GetTerminationReason)(_Out_ WSLCVirtualMachineTerminationReason* Reason, _Out_ LPWSTR* Details) override;
-    IFACEMETHOD(GetVmDiagnostics)(_Out_ WSLCVmDiagnostics* Diagnostics) override;
 
     // Image management.
     IFACEMETHOD(PullImage)(
@@ -376,8 +375,6 @@ private:
     // VM lifecycle / idle-termination state.
     std::atomic<VmState> m_vmState{VmState::None};
     std::atomic<bool> m_vmStopRequested{false};
-    // Number of times the VM has been (re)created; surfaced via GetVmDiagnostics.
-    std::atomic<ULONG> m_vmStartCount{0};
     // In-flight activity count and idle-worker wake event, decoupled from this object's lifetime
     // (see IdleState in WSLCIdleState.h) so activity tokens and container COM wrappers can safely
     // manage activity without keeping the session alive. See WSLCContainer::AddRef/Release and
