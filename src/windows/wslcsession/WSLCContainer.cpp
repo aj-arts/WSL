@@ -2211,6 +2211,10 @@ HRESULT WSLCContainer::Attach(LPCSTR DetachKeys, WSLCHandle* Stdin, WSLCHandle* 
     *Stdout = {};
     *Stderr = {};
 
+    // Hold a VM lease for the operation: an Exited container holds no activity reference, so without
+    // it the idle worker could tear the VM down mid-call (and a running container's state can change
+    // underneath the call). The lease also lazily restarts the VM if it was already idle-terminated.
+    auto vmLease = m_session.AcquireVmLease();
     return CallImpl(&WSLCContainerImpl::Attach, DetachKeys, Stdin, Stdout, Stderr);
 }
 
@@ -2278,6 +2282,10 @@ HRESULT WSLCContainer::Exec(const WSLCProcessOptions* Options, const WSLCProcess
     RETURN_HR_IF_MSG(E_INVALIDARG, WI_IsAnyFlagSet(Options->Flags, ~WSLCProcessFlagsValid), "Invalid flags: 0x%x", Options->Flags);
 
     *Process = nullptr;
+
+    // Hold a VM lease for the operation (see Attach()): keeps the VM alive across the call and
+    // lazily restarts it if it was idle-terminated.
+    auto vmLease = m_session.AcquireVmLease();
     return CallImpl(&WSLCContainerImpl::Exec, Options, StartOptions, Process);
 }
 
@@ -2308,6 +2316,10 @@ try
 
     THROW_HR_IF_MSG(E_INVALIDARG, WI_IsAnyFlagSet(Flags, ~WSLCContainerStartFlagsValid), "Invalid flags: 0x%x", Flags);
 
+    // Hold a VM lease for the operation (see Attach()). Start is valid on an Exited container, which
+    // holds no activity reference, so without the lease the idle worker could tear the VM down while
+    // Start runs (silently undoing the start) or the VM may already be idle-terminated.
+    auto vmLease = m_session.AcquireVmLease();
     return CallImpl(&WSLCContainerImpl::Start, Flags, StartOptions);
 }
 CATCH_RETURN();
@@ -2320,6 +2332,9 @@ HRESULT WSLCContainer::Inspect(LPSTR* Output)
 
     *Output = nullptr;
 
+    // Hold a VM lease for the operation (see Attach()). Inspect is valid on an Exited container,
+    // which holds no activity reference.
+    auto vmLease = m_session.AcquireVmLease();
     return CallImpl(&WSLCContainerImpl::Inspect, Output);
 }
 
@@ -2331,6 +2346,9 @@ try
     RETURN_HR_IF(E_POINTER, Output == nullptr);
 
     *Output = nullptr;
+
+    // Hold a VM lease for the operation (see Attach()).
+    auto vmLease = m_session.AcquireVmLease();
     return CallImpl(&WSLCContainerImpl::Stats, Output);
 }
 CATCH_RETURN();
@@ -2376,6 +2394,9 @@ HRESULT WSLCContainer::Export(WSLCHandle TarHandle)
 {
     WSLCExecutionContext context(&m_session);
 
+    // Hold a VM lease for the operation (see Attach()). Export is valid on an Exited container,
+    // which holds no activity reference.
+    auto vmLease = m_session.AcquireVmLease();
     return CallImpl(&WSLCContainerImpl::Export, TarHandle);
 }
 
@@ -2390,6 +2411,9 @@ try
     *Stdout = {};
     *Stderr = {};
 
+    // Hold a VM lease for the operation (see Attach()). Logs is valid on an Exited container, which
+    // holds no activity reference.
+    auto vmLease = m_session.AcquireVmLease();
     return CallImpl(&WSLCContainerImpl::Logs, Flags, Stdout, Stderr, Since, Until, Tail);
 }
 CATCH_RETURN();
@@ -2567,6 +2591,9 @@ HRESULT WSLCContainer::ConnectToNetwork(const WSLCNetworkConnectionOptions* Opti
 try
 {
     COMServiceExecutionContext context;
+
+    // Hold a VM lease for the operation (see Attach()).
+    auto vmLease = m_session.AcquireVmLease();
     return CallImpl(&WSLCContainerImpl::ConnectToNetwork, Options);
 }
 CATCH_RETURN();
@@ -2575,6 +2602,9 @@ HRESULT WSLCContainer::DisconnectFromNetwork(LPCSTR NetworkName)
 try
 {
     COMServiceExecutionContext context;
+
+    // Hold a VM lease for the operation (see Attach()).
+    auto vmLease = m_session.AcquireVmLease();
     return CallImpl(&WSLCContainerImpl::DisconnectFromNetwork, NetworkName);
 }
 CATCH_RETURN();

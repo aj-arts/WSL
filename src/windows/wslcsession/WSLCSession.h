@@ -415,8 +415,8 @@ private:
     std::atomic<bool> m_vmStopRequested{false};
     // In-flight activity count, idle timer and teardown callback, decoupled from this object's
     // lifetime (see IdleState in WSLCIdleState.h) so activity tokens and container COM wrappers can
-    // safely manage activity without keeping the session alive. See WSLCContainer::AddRef/Release,
-    // WSLCContainerImpl's ActivityRef and CreateActivityToken().
+    // safely manage activity without keeping the session alive. See WSLCContainerImpl's ActivityRef
+    // (m_activityHold), WSLCSession::VmLease and CreateActivityToken().
     std::shared_ptr<IdleState> m_idleState{std::make_shared<IdleState>()};
 
     // Persisted settings required to (re)create the VM on demand. The string fields point

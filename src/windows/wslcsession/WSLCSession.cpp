@@ -573,15 +573,14 @@ void WSLCSession::StopVmLockHeld()
 
     WSL_LOG("WslcVmIdleStop", TraceLoggingValue(m_id, "SessionId"));
 
-    // Flag the teardown as intentional so VM/dockerd/containerd exit callbacks (which fire
-    // from the IO relay thread while we hold the lock) do not treat it as a crash.
-    m_vmStopRequested.store(true);
+    // N.B. The caller (OnIdleTimer) owns m_vmStopRequested: it publishes the flag before this call -
+    // so VM/dockerd/containerd exit callbacks (which fire from the IO relay thread while we hold the
+    // lock) do not treat this teardown as a crash - and clears it afterwards.
     m_vmState.store(VmState::Stopping);
 
     TearDownVmLockHeld();
 
     m_vmState.store(VmState::None);
-    m_vmStopRequested.store(false);
 }
 
 void WSLCSession::TearDownVmLockHeld(bool CaptureTerminationReason)
@@ -712,8 +711,24 @@ void WSLCSession::OnIdleTimer()
             return;
         }
 
-        // If the VM already crashed, OnVmExited() on the relay thread is about to drive Terminate().
-        // Don't tear down here: StopVmLockHeld() joins the relay thread, which may be blocked in
+        // Publish the intentional-stop flag BEFORE probing for a VM crash, then tear down. This
+        // ordering is load-bearing: it prevents a deadlock with a concurrent crash.
+        //
+        // StopVmLockHeld() below joins the IO relay thread, which runs OnVmExited() when the VM
+        // exits. If OnVmExited() observes m_vmStopRequested == false it drives Terminate(), which
+        // spins for this exclusive lock - and our join would then wait forever on a thread blocked
+        // on the lock we hold.
+        //
+        // By storing the flag first (seq_cst), any OnVmExited() that runs after this point treats
+        // the exit as expected and returns without Terminate(). And any OnVmExited() that already
+        // read false must have read it after the crash signalled m_vmExitedEvent (the relay only
+        // dispatches that callback once the event is set), so the is_signaled() check below observes
+        // the crash and hands teardown to the relay thread instead of joining it.
+        m_vmStopRequested.store(true);
+        auto stopRequestedCleanup = wil::scope_exit([this]() { m_vmStopRequested.store(false); });
+
+        // If the VM already crashed, OnVmExited() on the relay thread will drive Terminate(). Don't
+        // tear down here: StopVmLockHeld() joins the relay thread, which may be blocked in
         // Terminate() trying to acquire this exclusive lock. Leave crashes to the relay thread.
         if (m_vmExitedEvent && m_vmExitedEvent.is_signaled())
         {
