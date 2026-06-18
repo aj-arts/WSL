@@ -321,11 +321,12 @@ HcsVirtualMachine::HcsVirtualMachine(_In_ const WSLCSessionSettings* Settings)
 
 HcsVirtualMachine::~HcsVirtualMachine()
 {
-    // N.B. Do not hold m_lock here. OnExit() acquires m_lock to cache the termination reason
-    // before signaling m_vmExitEvent, and closing the compute system below drains any in-flight
-    // HCS exit/crash callbacks. Holding m_lock across the exit-event wait and HcsCloseComputeSystem
-    // would deadlock against an in-flight OnExit() that is blocked acquiring m_lock. By the time the
-    // compute system is closed no further callbacks can run, so the remaining teardown is unguarded.
+    // N.B. Do not hold m_lock here. OnExit() caches the termination reason lock-free and publishes
+    // it by signaling m_vmExitEvent, and closing the compute system below drains any in-flight HCS
+    // exit/crash callbacks. Waiting on m_vmExitEvent and calling HcsCloseComputeSystem while holding
+    // m_lock would block any callback that needs the lock from completing, so the lock is not held.
+    // By the time the compute system is closed no further callbacks can run, so the remaining
+    // teardown is unguarded.
 
     // Wait up to 5 seconds for the VM to terminate gracefully.
     bool forceTerminate = false;

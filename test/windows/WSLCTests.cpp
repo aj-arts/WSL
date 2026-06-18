@@ -10810,7 +10810,7 @@ class WSLCTests
 
             // The VM (and container recovery) starts lazily on the first operation. Trigger it so
             // recovery runs and its warning is delivered to the session's warning callback.
-            WSLCProcessLauncher("/bin/sh", {"/bin/sh", "-c", "exit 0"}).Launch(*session2).GetExitEvent().wait(30000);
+            VERIFY_IS_TRUE(WSLCProcessLauncher("/bin/sh", {"/bin/sh", "-c", "exit 0"}).Launch(*session2).GetExitEvent().wait(30000));
 
             // Verify the warning matches the expected localized message for the corrupt container.
             auto warnings = warningCallback->GetWarnings();
@@ -10882,7 +10882,7 @@ class WSLCTests
 
             // The VM (and volume recovery) starts lazily on the first operation. Trigger it so
             // recovery runs and its warning is delivered to the session's warning callback.
-            WSLCProcessLauncher("/bin/sh", {"/bin/sh", "-c", "exit 0"}).Launch(*session).GetExitEvent().wait(30000);
+            VERIFY_IS_TRUE(WSLCProcessLauncher("/bin/sh", {"/bin/sh", "-c", "exit 0"}).Launch(*session).GetExitEvent().wait(30000));
 
             // Verify the warning matches the expected localized message for the missing volume.
             auto warnings = warningCallback->GetWarnings();
