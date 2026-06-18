@@ -562,6 +562,12 @@ WSLCContainerImpl::WSLCContainerImpl(
     m_initProcessFlags(InitProcessFlags),
     m_containerFlags(ContainerFlags)
 {
+    // Acquire the activity hold up front for containers recovered or created in an active state, so
+    // a recovered running container keeps the VM alive even before any client opens its wrapper.
+    if (m_state == WslcContainerStateCreated || m_state == WslcContainerStateRunning)
+    {
+        m_activityHold = ActivityRef(m_wslcSession.IdleStateShared());
+    }
 }
 
 WSLCContainerImpl::~WSLCContainerImpl()
@@ -2169,9 +2175,23 @@ __requires_lock_held(m_lock) void WSLCContainerImpl::Transition(WSLCContainerSta
     m_state = State;
     m_stateChangedAt = stateChangedAt.value_or(static_cast<std::uint64_t>(std::time(nullptr)));
 
-    // A container transitioning to a terminal state (e.g. Exited) may leave the session idle.
-    // Ask the session to re-evaluate whether the VM can be torn down. This is a non-blocking signal.
-    m_wslcSession.RequestIdleCheck();
+    // Keep the VM alive while this container is Created/Running and release the hold once it reaches
+    // a terminal state, even when no client holds the wrapper (e.g. a detached `run -d` container).
+    // Dropping the hold on the transition to Exited is what lets an otherwise-idle VM be torn down.
+    UpdateActivityHoldLockHeld();
+}
+
+__requires_lock_held(m_lock) void WSLCContainerImpl::UpdateActivityHoldLockHeld() noexcept
+{
+    const bool active = (m_state == WslcContainerStateCreated || m_state == WslcContainerStateRunning);
+    if (active && !m_activityHold)
+    {
+        m_activityHold = ActivityRef(m_wslcSession.IdleStateShared());
+    }
+    else if (!active && m_activityHold)
+    {
+        m_activityHold.reset();
+    }
 }
 
 WSLCContainer::WSLCContainer(WSLCContainerImpl* impl, WSLCSession& session, std::function<void(const WSLCContainerImpl*)>&& OnDeleted) :
@@ -2183,15 +2203,15 @@ WSLCContainer::WSLCContainer(WSLCContainerImpl* impl, WSLCSession& session, std:
 
 ULONG STDMETHODCALLTYPE WSLCContainer::AddRef()
 {
-    // Lock makes refcount and ActivityCount increment atomic to prevent underflow.
-    auto lock = m_idleState->ActivityLock.lock_exclusive();
+    // Lock makes the COM refcount transition and the activity increment atomic to prevent underflow.
+    auto lock = m_idleState->Lock().lock_exclusive();
 
     const ULONG previousCount = RuntimeClassBase::AddRef() - 1;
 
-    // 1→2 transition: client took first external reference. Increment activity to prevent idle teardown.
+    // 1->2 transition: client took first external reference. Increment activity to prevent idle teardown.
     if (previousCount == 1)
     {
-        m_idleState->ActivityCount.fetch_add(1);
+        m_idleState->AddActivityLockHeld();
     }
 
     return previousCount + 1;
@@ -2202,17 +2222,16 @@ ULONG STDMETHODCALLTYPE WSLCContainer::Release()
     // Snapshot state before Release(): this object may be destroyed after refcount drops.
     const std::shared_ptr<IdleState> idleState = m_idleState;
 
-    // Lock makes refcount and ActivityCount decrement atomic to prevent underflow.
-    auto lock = idleState->ActivityLock.lock_exclusive();
+    // Lock makes the COM refcount transition and the activity decrement atomic to prevent underflow.
+    auto lock = idleState->Lock().lock_exclusive();
 
     const ULONG count = RuntimeClassBase::Release();
 
-    // 2→1 transition: client released last external reference. Decrement activity.
-    if (count == 1 && idleState)
+    // 2->1 transition: client released last external reference. Decrement activity (arms idle timer
+    // if this was the last activity).
+    if (count == 1)
     {
-        const int previousActivity = idleState->ActivityCount.fetch_sub(1);
-        FAIL_FAST_IF(previousActivity <= 0); // Underflow is a fatal bug, not a recoverable condition
-        idleState->IdleCheckEvent.SetEvent();
+        idleState->ReleaseActivityLockHeld();
     }
 
     return count;

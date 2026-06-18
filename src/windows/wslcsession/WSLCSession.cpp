@@ -396,18 +396,11 @@ try
         TraceLoggingValue(m_displayName.c_str(), "DisplayName"),
         TraceLoggingValue(m_creatorProcessName.c_str(), "CreatorProcess"));
 
-    // The VM is created lazily on the first operation that requires it (see EnsureVmRunning)
-    // and torn down when the session becomes idle. Start the worker that performs idle teardown.
-    // The body is wrapped so an unexpected throw (e.g. COM initialization failure before the
-    // worker's own try/catch loop) is logged rather than escaping the thread and calling
-    // std::terminate(), which would crash the session process.
-    m_idleThread = std::thread([this]() {
-        try
-        {
-            IdleWorker();
-        }
-        CATCH_LOG()
-    });
+    // The VM is created lazily on the first operation that requires it (see EnsureVmRunning) and
+    // torn down once the session has been continuously idle (activity count zero) for the grace
+    // period. Wire up the idle-teardown timer; IdleState arms it whenever the activity count drops
+    // to zero and cancels it when activity resumes, so no dedicated worker thread is needed.
+    m_idleState->Initialize(c_vmIdleGracePeriod, [this]() { OnIdleTimer(); });
 
     return S_OK;
 }
@@ -687,134 +680,49 @@ void WSLCSession::TearDownVmLockHeld(bool CaptureTerminationReason)
     }
 }
 
-bool WSLCSession::HasActiveContainerLockHeld()
-{
-    std::lock_guard containersLock(m_containersLock);
-
-    // Created/Running containers keep VM alive. Exited containers don't. External refs now
-    // tracked via WSLCContainer::AddRef/Release, so no need to scan Exited containers.
-    return std::ranges::any_of(m_containers, [](const auto& entry) {
-        const auto state = entry.second->State();
-        return state == WslcContainerStateCreated || state == WslcContainerStateRunning;
-    });
-}
-
-void WSLCSession::RequestIdleCheck() noexcept
-{
-    if (m_idleState->IdleCheckEvent)
-    {
-        m_idleState->IdleCheckEvent.SetEvent();
-    }
-}
-
-void WSLCSession::IdleWorker()
+void WSLCSession::OnIdleTimer()
 {
     // Idle teardown releases cross-process COM proxies (the VM and its VM-scoped state), so this
-    // thread must join the process MTA; otherwise those Release/calls fail with RPC_E_WRONG_THREAD.
+    // threadpool callback must join the process MTA; otherwise those Release/calls fail with
+    // RPC_E_WRONG_THREAD.
     const auto coInit = wil::CoInitializeEx(COINIT_MULTITHREADED);
 
-    const HANDLE handles[] = {m_idleState->IdleCheckEvent.get(), m_sessionTerminatingEvent.get()};
-
-    // Absolute time at which a continuously-idle VM becomes eligible for teardown. Unset while
-    // the VM is non-idle; (re)armed when the VM is first observed idle. The wait below times out
-    // at this deadline so teardown happens promptly once the grace period elapses.
-    std::optional<std::chrono::steady_clock::time_point> idleDeadline;
-
-    for (;;)
+    try
     {
-        DWORD timeout = INFINITE;
-        if (idleDeadline.has_value())
+        if (m_terminating.load() || !IdleTerminationEnabled())
         {
-            const auto now = std::chrono::steady_clock::now();
-            timeout = (*idleDeadline <= now)
-                          ? 0
-                          : static_cast<DWORD>(std::chrono::duration_cast<std::chrono::milliseconds>(*idleDeadline - now).count());
+            return;
         }
 
-        const auto wait = WaitForMultipleObjects(ARRAYSIZE(handles), handles, FALSE, timeout);
-
-        // handles[1] (session terminating) or a wait failure ends the worker. handles[0] (idle
-        // check) and WAIT_TIMEOUT (grace period may have elapsed) both trigger a re-evaluation.
-        if (wait != WAIT_OBJECT_0 && wait != WAIT_TIMEOUT)
+        // Non-blocking acquire: a blocking exclusive would queue behind in-flight operations, and
+        // SRW locks favor waiting writers, stalling all new ops. If the lock is held, an operation
+        // is in flight; it holds an activity reference and will re-arm the timer (via the 1->0
+        // transition) when it releases, so there is nothing to do here.
+        auto lock = m_lock.try_lock_exclusive();
+        if (!lock)
         {
-            break;
+            return;
         }
 
-        if (wait == WAIT_OBJECT_0)
+        // Re-check every teardown precondition under the lock. The activity count is the single
+        // source of truth for "the VM is needed"; a 0->1 transition since the timer fired (cancel
+        // raced the callback) is caught here.
+        if (m_terminating.load() || m_vmState.load() != VmState::Running || m_idleState->ActivityCount() != 0)
         {
-            m_idleState->IdleCheckEvent.ResetEvent();
-
-            // An explicit idle-check signal means an operation or container state change just
-            // completed (it is raised on every lease/token release and terminal state change).
-            // Restart the grace clock so teardown happens a full grace period after the last
-            // activity, not after the first time the VM was ever observed idle.
-            idleDeadline.reset();
+            return;
         }
 
-        if (m_terminating.load())
+        // If the VM already crashed, OnVmExited() on the relay thread is about to drive Terminate().
+        // Don't tear down here: StopVmLockHeld() joins the relay thread, which may be blocked in
+        // Terminate() trying to acquire this exclusive lock. Leave crashes to the relay thread.
+        if (m_vmExitedEvent && m_vmExitedEvent.is_signaled())
         {
-            break;
+            return;
         }
 
-        if (!IdleTerminationEnabled())
-        {
-            idleDeadline.reset();
-            continue;
-        }
-
-        try
-        {
-            // Non-blocking acquire: a blocking exclusive would queue behind in-flight operations,
-            // and SRW locks favor waiting writers, stalling all new ops. If held, treat as active.
-            auto lock = m_lock.try_lock_exclusive();
-            if (!lock)
-            {
-                idleDeadline.reset();
-                continue;
-            }
-            if (m_terminating.load() || m_vmState.load() != VmState::Running)
-            {
-                idleDeadline.reset();
-                continue;
-            }
-
-            // If VM already crashed, OnVmExited() on relay thread is about to drive Terminate().
-            // Don't teardown here: StopVmLockHeld() joins relay thread, which may be blocked in
-            // Terminate() trying to acquire this exclusive lock. Leave crashes to relay thread.
-            if (m_vmExitedEvent && m_vmExitedEvent.is_signaled())
-            {
-                idleDeadline.reset();
-                continue;
-            }
-
-            // Keep the VM alive while any operation is in flight or any container is non-terminal,
-            // and restart the grace clock so a fresh idle period is required afterwards.
-            if (m_idleState->ActivityCount.load() != 0 || HasActiveContainerLockHeld())
-            {
-                idleDeadline.reset();
-                continue;
-            }
-
-            // The VM is idle. Arm the grace period if the clock is not already running, then
-            // defer teardown until it has fully elapsed. The clock is reset by any non-idle
-            // observation or explicit idle-check signal (see the WAIT_OBJECT_0 handling above),
-            // so a WAIT_TIMEOUT wake here means the VM has been idle for the whole grace period.
-            const auto now = std::chrono::steady_clock::now();
-            if (!idleDeadline.has_value())
-            {
-                idleDeadline = now + c_vmIdleGracePeriod;
-            }
-
-            if (now < *idleDeadline)
-            {
-                continue;
-            }
-
-            idleDeadline.reset();
-            StopVmLockHeld();
-        }
-        CATCH_LOG();
+        StopVmLockHeld();
     }
+    CATCH_LOG();
 }
 
 WSLCSession::VmLease WSLCSession::AcquireVmLease()
@@ -824,12 +732,13 @@ WSLCSession::VmLease WSLCSession::AcquireVmLease()
 
 WSLCSession::VmLease::VmLease(WSLCSession& Session) : m_session(&Session)
 {
-    // Record an in-flight operation before bringing the VM up so the idle worker cannot tear
-    // it down between EnsureVmRunning() and acquiring the shared lock.
-    m_session->m_idleState->ActivityCount.fetch_add(1);
+    // Record an in-flight operation before bringing the VM up so idle teardown cannot tear it down
+    // between EnsureVmRunning() and acquiring the shared lock. AddActivity cancels any pending idle
+    // timer.
+    m_session->m_idleState->AddActivity();
 
     auto countCleanup = wil::scope_exit([this]() {
-        m_session->m_idleState->ActivityCount.fetch_sub(1);
+        m_session->m_idleState->ReleaseActivity();
         m_session = nullptr;
     });
 
@@ -862,9 +771,10 @@ WSLCSession::VmLease& WSLCSession::VmLease::operator=(VmLease&& Other) noexcept
     {
         if (m_session != nullptr)
         {
+            // Release the shared lock before the activity reference so that, if this was the last
+            // activity, idle teardown can immediately take the exclusive lock.
             m_lock.reset();
-            m_session->m_idleState->ActivityCount.fetch_sub(1);
-            m_session->RequestIdleCheck();
+            m_session->m_idleState->ReleaseActivity();
         }
 
         m_session = std::exchange(Other.m_session, nullptr);
@@ -878,11 +788,11 @@ WSLCSession::VmLease::~VmLease()
 {
     if (m_session != nullptr)
     {
-        // Release the shared lock before triggering the idle check so the idle worker can
-        // immediately take the exclusive lock if the session is now idle.
+        // Release the shared lock before the activity reference so that, if this was the last
+        // activity, idle teardown can immediately take the exclusive lock. ReleaseActivity arms the
+        // idle timer on the 1->0 transition.
         m_lock.reset();
-        m_session->m_idleState->ActivityCount.fetch_sub(1);
-        m_session->RequestIdleCheck();
+        m_session->m_idleState->ReleaseActivity();
     }
 }
 
@@ -2468,21 +2378,15 @@ Microsoft::WRL::ComPtr<IUnknown> WSLCSession::CreateActivityToken()
 {
     // Record the in-flight activity up front so the VM cannot idle-terminate before the caller
     // takes ownership of the returned token.
-    m_idleState->ActivityCount.fetch_add(1);
-    auto countCleanup = wil::scope_exit([this]() {
-        m_idleState->ActivityCount.fetch_sub(1);
-        RequestIdleCheck();
-    });
+    m_idleState->AddActivity();
+    auto countCleanup = wil::scope_exit([this]() { m_idleState->ReleaseActivity(); });
 
     auto operation = Microsoft::WRL::Make<ContainerOperation>();
     THROW_IF_NULL_ALLOC(operation.Get());
 
     // Capture shared idle state so token can outlive session and release activity without keeping session alive.
     std::shared_ptr<IdleState> idleState = m_idleState;
-    operation->Initialize([idleState = std::move(idleState)]() {
-        idleState->ActivityCount.fetch_sub(1);
-        idleState->IdleCheckEvent.SetEvent();
-    });
+    operation->Initialize([idleState = std::move(idleState)]() { idleState->ReleaseActivity(); });
 
     // The token now owns the activity-count reference and will release it on destruction.
     countCleanup.release();
@@ -3307,17 +3211,17 @@ try
     // session and a populated termination reason.
     m_sessionTerminatedEvent.SetEvent();
 
-    // Release the exclusive lock before joining the idle worker. If the worker is currently
-    // blocked acquiring the exclusive lock (about to evaluate idle teardown), it must be able
-    // to obtain it, observe m_terminating, and exit — otherwise the join below would deadlock.
+    // Release the exclusive lock before disarming the idle timer. If a timer callback is currently
+    // blocked acquiring the exclusive lock (about to evaluate idle teardown), it must be able to
+    // obtain it, observe m_terminating, and return — otherwise Disarm()'s wait for in-flight
+    // callbacks below would deadlock.
     sessionLock.reset();
 
-    if (m_idleThread.joinable())
-    {
-        m_idleThread.join();
-    }
+    // Permanently disable idle teardown and drain any in-flight timer callback so it cannot
+    // reference this session after it is destroyed.
+    m_idleState->Disarm();
 
-    // The idle worker has exited and no operation can run past termination, so the parked VM
+    // Idle teardown is disabled and no operation can run past termination, so the parked VM
     // factory can no longer be re-fetched; revoke it from the GIT.
     if (m_vmFactoryGitCookie != 0)
     {

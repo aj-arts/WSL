@@ -27,7 +27,6 @@ Abstract:
 #include <atomic>
 #include <list>
 #include <optional>
-#include <thread>
 #include <unordered_map>
 
 namespace wsl::windows::service::wslc {
@@ -270,9 +269,13 @@ public:
 
     bool WaitForEventOrSessionTerminating(HANDLE Event, std::chrono::milliseconds Timeout) const;
 
-    // Signals the idle worker to re-evaluate whether the VM can be torn down.
-    // Safe to call from any thread, including IO relay / container callbacks.
-    void RequestIdleCheck() noexcept;
+    // Shared idle-termination state. Exposed so VM-scoped objects (e.g. running containers via
+    // WSLCContainerImpl's ActivityRef) can hold an activity reference for their lifetime without
+    // keeping the session object itself alive.
+    std::shared_ptr<IdleState> IdleStateShared() const noexcept
+    {
+        return m_idleState;
+    }
 
     // Creates an opaque activity token that holds a reference on this session's activity count for
     // its lifetime, deferring idle teardown of the VM until every outstanding token is released.
@@ -299,11 +302,11 @@ private:
     void StopVmLockHeld();
     _Requires_exclusive_lock_held_(m_lock)
     void TearDownVmLockHeld(bool CaptureTerminationReason = false);
-    _Requires_exclusive_lock_held_(m_lock)
-    bool HasActiveContainerLockHeld();
     void EnsureVmRunning();
 
-    void IdleWorker();
+    // Idle-teardown callback invoked by IdleState's timer once the VM has been continuously idle
+    // (activity count zero) for the grace period. Runs on a threadpool thread.
+    void OnIdleTimer();
     bool IdleTerminationEnabled() const noexcept;
     void PersistSettings(const WSLCSessionInitSettings& Settings, PSID UserSid);
 
@@ -410,12 +413,11 @@ private:
     // VM lifecycle / idle-termination state.
     std::atomic<VmState> m_vmState{VmState::None};
     std::atomic<bool> m_vmStopRequested{false};
-    // In-flight activity count and idle-worker wake event, decoupled from this object's lifetime
-    // (see IdleState in WSLCIdleState.h) so activity tokens and container COM wrappers can safely
-    // manage activity without keeping the session alive. See WSLCContainer::AddRef/Release and
-    // CreateActivityToken().
+    // In-flight activity count, idle timer and teardown callback, decoupled from this object's
+    // lifetime (see IdleState in WSLCIdleState.h) so activity tokens and container COM wrappers can
+    // safely manage activity without keeping the session alive. See WSLCContainer::AddRef/Release,
+    // WSLCContainerImpl's ActivityRef and CreateActivityToken().
     std::shared_ptr<IdleState> m_idleState{std::make_shared<IdleState>()};
-    std::thread m_idleThread;
 
     // Persisted settings required to (re)create the VM on demand. The string fields point
     // into the owned storage members below (or m_displayName) so they remain valid for the

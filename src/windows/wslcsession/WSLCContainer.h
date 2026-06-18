@@ -177,6 +177,10 @@ private:
     void MapPorts();
     void UnmapPorts();
 
+    // Acquires or releases the activity hold so it is held exactly while the container is in an
+    // active (Created/Running) state, keeping the session's VM alive across idle teardown.
+    __requires_lock_held(m_lock) void UpdateActivityHoldLockHeld() noexcept;
+
     __requires_shared_lock_held(m_lock) std::string InspectLockHeld() const;
 
     mutable wil::srwlock m_lock;
@@ -221,6 +225,11 @@ private:
     DockerEventTracker::EventTrackingReference m_containerEvents;
     IORelay& m_ioRelay;
     std::string m_networkMode;
+
+    // Held (non-empty) exactly while the container is Created/Running so the session's VM stays
+    // alive even when no client holds the wrapper (e.g. a detached `run -d` container). Maintained
+    // by UpdateActivityHoldLockHeld(); released automatically when the container is destroyed.
+    ActivityRef m_activityHold;
 };
 
 class DECLSPEC_UUID("B1F1C4E3-C225-4CAE-AD8A-34C004DE1AE4") WSLCContainer
@@ -230,7 +239,7 @@ class DECLSPEC_UUID("B1F1C4E3-C225-4CAE-AD8A-34C004DE1AE4") WSLCContainer
 
 public:
     using RuntimeClassBase =
-        Microsoft::WRL::RuntimeClass<Microsoft::WRL::RuntimeClassFlags<Microsoft::WRL::ClassicCom>, IWSLCContainer, IFastRundown, ISupportErrorInfo>;
+        Microsoft::WRL::RuntimeClass<Microsoft::WRL::RuntimeClassFlags<Microsoft::WRL::ClassicCom>, IWSLCContainer, IWSLCCompatContainer, IFastRundown, ISupportErrorInfo>;
 
     WSLCContainer(WSLCContainerImpl* impl, WSLCSession& session, std::function<void(const WSLCContainerImpl*)>&& OnDeleted);
 
@@ -259,9 +268,10 @@ public:
 
     IFACEMETHOD(InterfaceSupportsErrorInfo)(REFIID riid);
 
-    // RuntimeClass reference-count overrides for activity tracking. On 1→2 refcount transition
+    // RuntimeClass reference-count overrides for activity tracking. On 1->2 refcount transition
     // (client takes first reference), increments session activity to prevent idle teardown. On
-    // 2→1 transition (client releases), decrements activity and wakes idle worker.
+    // 2->1 transition (client releases), decrements activity (which arms the idle timer if it was
+    // the last activity).
     ULONG STDMETHODCALLTYPE AddRef() override;
     ULONG STDMETHODCALLTYPE Release() override;
 
