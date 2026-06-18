@@ -10949,6 +10949,10 @@ class WSLCTests
             VERIFY_SUCCEEDED(sessionManager->CreateSession(&settings, WSLCSessionFlagsNone, warningCallback.Get(), &session));
             wsl::windows::common::security::ConfigureForCOMImpersonation(session.get());
 
+            // The VM (and guest volume recovery) starts lazily on the first operation. Trigger it so
+            // recovery runs and its warning is delivered to the session's warning callback.
+            VERIFY_IS_TRUE(WSLCProcessLauncher("/bin/sh", {"/bin/sh", "-c", "exit 0"}).Launch(*session).GetExitEvent().wait(30000));
+
             auto warnings = warningCallback->GetWarnings();
             auto expectedWarning = std::format(L"wsl: {}\n", wsl::shared::Localization::MessageWslcFailedToRecoverVolume(c_volumeName));
 
