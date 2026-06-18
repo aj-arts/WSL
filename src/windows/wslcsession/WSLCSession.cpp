@@ -680,64 +680,64 @@ void WSLCSession::TearDownVmLockHeld(bool CaptureTerminationReason)
 }
 
 void WSLCSession::OnIdleTimer()
+try
 {
     // Idle teardown releases cross-process COM proxies (the VM and its VM-scoped state), so this
     // threadpool callback must join the process MTA; otherwise those Release/calls fail with
-    // RPC_E_WRONG_THREAD.
+    // RPC_E_WRONG_THREAD. The function-try-block keeps this (and everything below) under CATCH_LOG:
+    // the threadpool callback that invokes us is noexcept, so an escaping throw would terminate.
     const auto coInit = wil::CoInitializeEx(COINIT_MULTITHREADED);
 
-    try
+    if (m_terminating.load() || !IdleTerminationEnabled())
     {
-        if (m_terminating.load() || !IdleTerminationEnabled())
-        {
-            return;
-        }
-
-        // Non-blocking acquire: a blocking exclusive would queue behind in-flight operations, and
-        // SRW locks favor waiting writers, stalling all new ops. If the lock is held, an operation
-        // is in flight; it holds an activity reference and will re-arm the timer (via the 1->0
-        // transition) when it releases, so there is nothing to do here.
-        auto lock = m_lock.try_lock_exclusive();
-        if (!lock)
-        {
-            return;
-        }
-
-        // Re-check every teardown precondition under the lock. The activity count is the single
-        // source of truth for "the VM is needed"; a 0->1 transition since the timer fired (cancel
-        // raced the callback) is caught here.
-        if (m_terminating.load() || m_vmState.load() != VmState::Running || m_idleState->ActivityCount() != 0)
-        {
-            return;
-        }
-
-        // Publish the intentional-stop flag BEFORE probing for a VM crash, then tear down. This
-        // ordering is load-bearing: it prevents a deadlock with a concurrent crash.
-        //
-        // StopVmLockHeld() below joins the IO relay thread, which runs OnVmExited() when the VM
-        // exits. If OnVmExited() observes m_vmStopRequested == false it drives Terminate(), which
-        // spins for this exclusive lock - and our join would then wait forever on a thread blocked
-        // on the lock we hold.
-        //
-        // By storing the flag first (seq_cst), any OnVmExited() that runs after this point treats
-        // the exit as expected and returns without Terminate(). And any OnVmExited() that already
-        // read false must have read it after the crash signalled m_vmExitedEvent (the relay only
-        // dispatches that callback once the event is set), so the is_signaled() check below observes
-        // the crash and hands teardown to the relay thread instead of joining it.
-        m_vmStopRequested.store(true);
-        auto stopRequestedCleanup = wil::scope_exit([this]() { m_vmStopRequested.store(false); });
-
-        // If the VM already crashed, OnVmExited() on the relay thread will drive Terminate(). Don't
-        // tear down here: StopVmLockHeld() joins the relay thread, which may be blocked in
-        // Terminate() trying to acquire this exclusive lock. Leave crashes to the relay thread.
-        if (m_vmExitedEvent && m_vmExitedEvent.is_signaled())
-        {
-            return;
-        }
-
-        StopVmLockHeld();
+        return;
     }
-    CATCH_LOG();
+
+    // Non-blocking acquire: a blocking exclusive would queue behind in-flight operations, and
+    // SRW locks favor waiting writers, stalling all new ops. If the lock is held, an operation
+    // is in flight; it holds an activity reference and will re-arm the timer (via the 1->0
+    // transition) when it releases, so there is nothing to do here.
+    auto lock = m_lock.try_lock_exclusive();
+    if (!lock)
+    {
+        return;
+    }
+
+    // Re-check every teardown precondition under the lock. The activity count is the single
+    // source of truth for "the VM is needed"; a 0->1 transition since the timer fired (cancel
+    // raced the callback) is caught here.
+    if (m_terminating.load() || m_vmState.load() != VmState::Running || m_idleState->ActivityCount() != 0)
+    {
+        return;
+    }
+
+    // Publish the intentional-stop flag BEFORE probing for a VM crash, then tear down. This
+    // ordering is load-bearing: it prevents a deadlock with a concurrent crash.
+    //
+    // StopVmLockHeld() below joins the IO relay thread, which runs OnVmExited() when the VM
+    // exits. If OnVmExited() observes m_vmStopRequested == false it drives Terminate(), which
+    // spins for this exclusive lock - and our join would then wait forever on a thread blocked
+    // on the lock we hold.
+    //
+    // By storing the flag first (seq_cst), any OnVmExited() that runs after this point treats
+    // the exit as expected and returns without Terminate(). And any OnVmExited() that already
+    // read false must have read it after the crash signalled m_vmExitedEvent (the relay only
+    // dispatches that callback once the event is set), so the is_signaled() check below observes
+    // the crash and hands teardown to the relay thread instead of joining it.
+    m_vmStopRequested.store(true);
+    auto stopRequestedCleanup = wil::scope_exit([this]() { m_vmStopRequested.store(false); });
+
+    // If the VM already crashed, OnVmExited() on the relay thread will drive Terminate(). Don't
+    // tear down here: StopVmLockHeld() joins the relay thread, which may be blocked in
+    // Terminate() trying to acquire this exclusive lock. Leave crashes to the relay thread.
+    if (m_vmExitedEvent && m_vmExitedEvent.is_signaled())
+    {
+        return;
+    }
+
+    StopVmLockHeld();
+}
+CATCH_LOG();
 }
 
 WSLCSession::VmLease WSLCSession::AcquireVmLease()
@@ -2363,29 +2363,29 @@ CATCH_RETURN();
 
 namespace {
 
-    // Activity token holds an activity reference to prevent idle VM teardown while client holds it.
-    // Implements IFastRundown so crashed clients reclaim stub promptly instead of slow default rundown.
-    class ContainerOperation
-        : public Microsoft::WRL::RuntimeClass<Microsoft::WRL::RuntimeClassFlags<Microsoft::WRL::ClassicCom>, IUnknown, IFastRundown>
+// Activity token holds an activity reference to prevent idle VM teardown while client holds it.
+// Implements IFastRundown so crashed clients reclaim stub promptly instead of slow default rundown.
+class ContainerOperation
+    : public Microsoft::WRL::RuntimeClass<Microsoft::WRL::RuntimeClassFlags<Microsoft::WRL::ClassicCom>, IUnknown, IFastRundown>
+{
+public:
+    // Adopts an activity reference from CreateActivityToken; callback releases it.
+    void Initialize(std::function<void()>&& onRelease) noexcept
     {
-    public:
-        // Adopts an activity reference from CreateActivityToken; callback releases it.
-        void Initialize(std::function<void()>&& onRelease) noexcept
-        {
-            m_onRelease = std::move(onRelease);
-        }
+        m_onRelease = std::move(onRelease);
+    }
 
-        ~ContainerOperation() override
+    ~ContainerOperation() override
+    {
+        if (m_onRelease)
         {
-            if (m_onRelease)
-            {
-                m_onRelease();
-            }
+            m_onRelease();
         }
+    }
 
-    private:
-        std::function<void()> m_onRelease;
-    };
+private:
+    std::function<void()> m_onRelease;
+};
 
 } // namespace
 
