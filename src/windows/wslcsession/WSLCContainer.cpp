@@ -2197,44 +2197,6 @@ __requires_lock_held(m_lock) void WSLCContainerImpl::UpdateActivityHoldLockHeld(
 WSLCContainer::WSLCContainer(WSLCContainerImpl* impl, WSLCSession& session, std::function<void(const WSLCContainerImpl*)>&& OnDeleted) :
     COMImplClass<WSLCContainerImpl>(impl), m_session(session), m_onDeleted(std::move(OnDeleted))
 {
-    // Capture shared idle state so AddRef/Release can manage activity without dereferencing m_session.
-    m_idleState = session.m_idleState;
-}
-
-ULONG STDMETHODCALLTYPE WSLCContainer::AddRef()
-{
-    // Lock makes the COM refcount transition and the activity increment atomic to prevent underflow.
-    auto lock = m_idleState->Lock().lock_exclusive();
-
-    const ULONG previousCount = RuntimeClassBase::AddRef() - 1;
-
-    // 1->2 transition: client took first external reference. Increment activity to prevent idle teardown.
-    if (previousCount == 1)
-    {
-        m_idleState->AddActivityLockHeld();
-    }
-
-    return previousCount + 1;
-}
-
-ULONG STDMETHODCALLTYPE WSLCContainer::Release()
-{
-    // Snapshot state before Release(): this object may be destroyed after refcount drops.
-    const std::shared_ptr<IdleState> idleState = m_idleState;
-
-    // Lock makes the COM refcount transition and the activity decrement atomic to prevent underflow.
-    auto lock = idleState->Lock().lock_exclusive();
-
-    const ULONG count = RuntimeClassBase::Release();
-
-    // 2->1 transition: client released last external reference. Decrement activity (arms idle timer
-    // if this was the last activity).
-    if (count == 1)
-    {
-        idleState->ReleaseActivityLockHeld();
-    }
-
-    return count;
 }
 
 HRESULT WSLCContainer::Attach(LPCSTR DetachKeys, WSLCHandle* Stdin, WSLCHandle* Stdout, WSLCHandle* Stderr)

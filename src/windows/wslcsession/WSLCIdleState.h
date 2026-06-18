@@ -27,7 +27,6 @@ namespace wsl::windows::service::wslc {
 // A single activity refcount is the only source of truth for "the VM is needed". Everything that
 // requires the VM holds a reference for as long as it needs it:
 //   * in-flight operations (WSLCSession::VmLease),
-//   * client-held container COM wrappers (WSLCContainer::AddRef/Release),
 //   * running/created containers themselves (WSLCContainerImpl's ActivityRef),
 //   * client-held process wrappers (WSLCProcess keep-alive token),
 //   * multi-round-trip CLI operations (WSLCSession::BeginContainerOperation).
@@ -87,28 +86,16 @@ public:
     void AddActivity() noexcept
     {
         auto lock = m_lock.lock_exclusive();
-        AddActivityLockHeld();
-    }
-
-    // Records the end of an activity; arms the idle timer on the 1->0 transition.
-    void ReleaseActivity() noexcept
-    {
-        auto lock = m_lock.lock_exclusive();
-        ReleaseActivityLockHeld();
-    }
-
-    // Variants for callers (WSLCContainer::AddRef/Release) that already hold Lock() to keep the COM
-    // refcount transition and the activity adjustment atomic.
-    void AddActivityLockHeld() noexcept
-    {
         if (m_activityCount.fetch_add(1) == 0)
         {
             CancelLockHeld();
         }
     }
 
-    void ReleaseActivityLockHeld() noexcept
+    // Records the end of an activity; arms the idle timer on the 1->0 transition.
+    void ReleaseActivity() noexcept
     {
+        auto lock = m_lock.lock_exclusive();
         const int previous = m_activityCount.fetch_sub(1);
         FAIL_FAST_IF(previous <= 0); // Underflow is a fatal bug, not a recoverable condition.
         if (previous == 1)
@@ -120,13 +107,6 @@ public:
     int ActivityCount() const noexcept
     {
         return m_activityCount.load();
-    }
-
-    // Serializes COM refcount transitions with activity adjustments. Acquired by
-    // WSLCContainer::AddRef/Release around RuntimeClassBase::AddRef/Release.
-    wil::srwlock& Lock() noexcept
-    {
-        return m_lock;
     }
 
 private:

@@ -238,9 +238,6 @@ class DECLSPEC_UUID("B1F1C4E3-C225-4CAE-AD8A-34C004DE1AE4") WSLCContainer
 {
 
 public:
-    using RuntimeClassBase =
-        Microsoft::WRL::RuntimeClass<Microsoft::WRL::RuntimeClassFlags<Microsoft::WRL::ClassicCom>, IWSLCContainer, IWSLCCompatContainer, IFastRundown, ISupportErrorInfo>;
-
     WSLCContainer(WSLCContainerImpl* impl, WSLCSession& session, std::function<void(const WSLCContainerImpl*)>&& OnDeleted);
 
     IFACEMETHOD(Attach)(_In_opt_ LPCSTR DetachKeys, _Out_ WSLCHandle* Stdin, _Out_ WSLCHandle* Stdout, _Out_ WSLCHandle* Stderr) override;
@@ -268,13 +265,6 @@ public:
 
     IFACEMETHOD(InterfaceSupportsErrorInfo)(REFIID riid);
 
-    // RuntimeClass reference-count overrides for activity tracking. On 1->2 refcount transition
-    // (client takes first reference), increments session activity to prevent idle teardown. On
-    // 2->1 transition (client releases), decrements activity (which arms the idle timer if it was
-    // the last activity).
-    ULONG STDMETHODCALLTYPE AddRef() override;
-    ULONG STDMETHODCALLTYPE Release() override;
-
     // Cache read-only properties so they remain accessible after the impl is disconnected.
     // Called from WSLCContainerImpl::PrepareDisconnectComWrapper() while m_lock is held exclusively.
     void CacheState(const std::string& id, const std::string& name, WSLCContainerState state, const Microsoft::WRL::ComPtr<IWSLCProcess>& initProcess) noexcept;
@@ -282,10 +272,6 @@ public:
 private:
     WSLCSession& m_session;
     std::function<void(const WSLCContainerImpl*)> m_onDeleted;
-
-    // Shared idle state captured from session at construction. Lets AddRef/Release manage activity
-    // without dereferencing m_session (safe even if wrapper outlives session).
-    std::shared_ptr<wsl::windows::service::wslc::IdleState> m_idleState;
 
     // Cached read-only properties populated by CacheState() so they remain
     // accessible after the impl is disconnected.
