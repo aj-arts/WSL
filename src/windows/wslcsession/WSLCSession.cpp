@@ -738,7 +738,6 @@ try
     StopVmLockHeld();
 }
 CATCH_LOG();
-}
 
 WSLCSession::VmLease WSLCSession::AcquireVmLease()
 {
@@ -2363,29 +2362,29 @@ CATCH_RETURN();
 
 namespace {
 
-// Activity token holds an activity reference to prevent idle VM teardown while client holds it.
-// Implements IFastRundown so crashed clients reclaim stub promptly instead of slow default rundown.
-class ContainerOperation
-    : public Microsoft::WRL::RuntimeClass<Microsoft::WRL::RuntimeClassFlags<Microsoft::WRL::ClassicCom>, IUnknown, IFastRundown>
-{
-public:
-    // Adopts an activity reference from CreateActivityToken; callback releases it.
-    void Initialize(std::function<void()>&& onRelease) noexcept
+    // Activity token holds an activity reference to prevent idle VM teardown while client holds it.
+    // Implements IFastRundown so crashed clients reclaim stub promptly instead of slow default rundown.
+    class ContainerOperation
+        : public Microsoft::WRL::RuntimeClass<Microsoft::WRL::RuntimeClassFlags<Microsoft::WRL::ClassicCom>, IUnknown, IFastRundown>
     {
-        m_onRelease = std::move(onRelease);
-    }
-
-    ~ContainerOperation() override
-    {
-        if (m_onRelease)
+    public:
+        // Adopts an activity reference from CreateActivityToken; callback releases it.
+        void Initialize(std::function<void()>&& onRelease) noexcept
         {
-            m_onRelease();
+            m_onRelease = std::move(onRelease);
         }
-    }
 
-private:
-    std::function<void()> m_onRelease;
-};
+        ~ContainerOperation() override
+        {
+            if (m_onRelease)
+            {
+                m_onRelease();
+            }
+        }
+
+    private:
+        std::function<void()> m_onRelease;
+    };
 
 } // namespace
 
