@@ -296,6 +296,17 @@ private:
         Stopping,
     };
 
+    // Single-owner arbitration for a VM exit, claimed via compare_exchange by exactly one of
+    // OnIdleTimer() (idle teardown) and OnVmExited() (spontaneous-exit teardown). This prevents
+    // both a deadlock (OnIdleTimer joining the relay thread while OnVmExited spins for the lock)
+    // and a missed teardown (both deferring to each other). A fresh VM starts in Active.
+    enum class VmExitDisposition
+    {
+        Active,        // VM running normally; a VM exit is unexpected and triggers permanent Terminate().
+        StopRequested, // OnIdleTimer owns a soft idle stop; a VM exit is expected and OnVmExited declines.
+        ExitClaimed,   // OnVmExited owns the permanent teardown of a spontaneous exit; OnIdleTimer declines.
+    };
+
     _Requires_exclusive_lock_held_(m_lock)
     void StartVmLockHeld();
     _Requires_exclusive_lock_held_(m_lock)
@@ -412,7 +423,7 @@ private:
 
     // VM lifecycle / idle-termination state.
     std::atomic<VmState> m_vmState{VmState::None};
-    std::atomic<bool> m_vmStopRequested{false};
+    std::atomic<VmExitDisposition> m_vmExitDisposition{VmExitDisposition::Active};
     // In-flight activity count, idle timer and teardown callback, decoupled from this object's
     // lifetime (see IdleState in WSLCIdleState.h) so activity tokens and container COM wrappers can
     // safely manage activity without keeping the session alive. See WSLCContainerImpl's ActivityRef

@@ -491,7 +491,7 @@ void WSLCSession::StartVmLockHeld()
     WSL_LOG("WslcVmStarting", TraceLoggingValue(m_id, "SessionId"));
 
     m_vmState.store(VmState::Starting);
-    m_vmStopRequested.store(false);
+    m_vmExitDisposition.store(VmExitDisposition::Active);
 
     // Tear everything back down if bring-up fails partway through.
     auto startCleanup = wil::scope_exit_log(WI_DIAGNOSTICS_INFO, [&]() {
@@ -573,9 +573,9 @@ void WSLCSession::StopVmLockHeld()
 
     WSL_LOG("WslcVmIdleStop", TraceLoggingValue(m_id, "SessionId"));
 
-    // N.B. The caller (OnIdleTimer) owns m_vmStopRequested: it publishes the flag before this call -
-    // so VM/dockerd/containerd exit callbacks (which fire from the IO relay thread while we hold the
-    // lock) do not treat this teardown as a crash - and clears it afterwards.
+    // N.B. The caller (OnIdleTimer) has claimed VmExitDisposition::StopRequested, so VM/dockerd/
+    // containerd exit callbacks (which fire from the IO relay thread while we hold the lock) do not
+    // treat this teardown as a crash. OnIdleTimer restores the disposition afterwards.
     m_vmState.store(VmState::Stopping);
 
     TearDownVmLockHeld();
@@ -711,29 +711,31 @@ try
         return;
     }
 
-    // Publish the intentional-stop flag BEFORE probing for a VM crash, then tear down. This
-    // ordering is load-bearing: it prevents a deadlock with a concurrent crash.
+    // Claim the idle stop. OnIdleTimer (this thread, holding the exclusive lock) and OnVmExited
+    // (the relay thread, lock-free) arbitrate a VM exit through a single compare_exchange so that
+    // exactly one of them owns teardown - never both (missed teardown) and never in a way that
+    // deadlocks.
     //
-    // StopVmLockHeld() below joins the IO relay thread, which runs OnVmExited() when the VM
-    // exits. If OnVmExited() observes m_vmStopRequested == false it drives Terminate(), which
-    // spins for this exclusive lock - and our join would then wait forever on a thread blocked
-    // on the lock we hold.
+    // If the CAS fails, OnVmExited has already claimed ExitClaimed for a spontaneous exit and is
+    // driving a permanent Terminate() that spins for this lock. Return so we release the lock and
+    // let it proceed; joining the relay thread here (StopVmLockHeld -> IO relay Stop) would deadlock
+    // against that spinning callback.
     //
-    // By storing the flag first (seq_cst), any OnVmExited() that runs after this point treats
-    // the exit as expected and returns without Terminate(). And any OnVmExited() that already
-    // read false must have read it after the crash signalled m_vmExitedEvent (the relay only
-    // dispatches that callback once the event is set), so the is_signaled() check below observes
-    // the crash and hands teardown to the relay thread instead of joining it.
-    m_vmStopRequested.store(true);
-    auto stopRequestedCleanup = wil::scope_exit([this]() { m_vmStopRequested.store(false); });
-
-    // If the VM already crashed, OnVmExited() on the relay thread will drive Terminate(). Don't
-    // tear down here: StopVmLockHeld() joins the relay thread, which may be blocked in
-    // Terminate() trying to acquire this exclusive lock. Leave crashes to the relay thread.
-    if (m_vmExitedEvent && m_vmExitedEvent.is_signaled())
+    // If the CAS succeeds we own the stop. Any OnVmExited() that runs from here on observes
+    // StopRequested and declines (no Terminate(), no spin), so it is safe for StopVmLockHeld() to
+    // join the relay thread - even if the VM already exited, which TearDownVmLockHeld() handles.
+    auto expected = VmExitDisposition::Active;
+    if (!m_vmExitDisposition.compare_exchange_strong(expected, VmExitDisposition::StopRequested))
     {
         return;
     }
+
+    // Restore Active once the stop completes (or on any early exit) so the next StartVmLockHeld
+    // begins with a clean disposition. Only clear our own StopRequested claim.
+    auto dispositionCleanup = wil::scope_exit([this]() {
+        auto stopRequested = VmExitDisposition::StopRequested;
+        m_vmExitDisposition.compare_exchange_strong(stopRequested, VmExitDisposition::Active);
+    });
 
     StopVmLockHeld();
 }
@@ -927,7 +929,7 @@ HRESULT WSLCSession::GetId(ULONG* Id)
 
 void WSLCSession::OnDockerdExited()
 {
-    if (!m_sessionTerminatingEvent.is_signaled() && !m_vmStopRequested.load())
+    if (!m_sessionTerminatingEvent.is_signaled() && m_vmExitDisposition.load() != VmExitDisposition::StopRequested)
     {
         WSL_LOG("UnexpectedDockerdExit", TraceLoggingValue(m_displayName.c_str(), "Name"));
     }
@@ -935,7 +937,7 @@ void WSLCSession::OnDockerdExited()
 
 void WSLCSession::OnContainerdExited()
 {
-    if (!m_sessionTerminatingEvent.is_signaled() && !m_vmStopRequested.load())
+    if (!m_sessionTerminatingEvent.is_signaled() && m_vmExitDisposition.load() != VmExitDisposition::StopRequested)
     {
         WSL_LOG("UnexpectedContainerdExit", TraceLoggingValue(m_displayName.c_str(), "Name"));
     }
@@ -943,8 +945,12 @@ void WSLCSession::OnContainerdExited()
 
 void WSLCSession::OnVmExited()
 {
-    // Idle shutdown is in progress, VM exit is expected. Don't terminate session.
-    if (m_vmStopRequested.load())
+    // Arbitrate against a concurrent OnIdleTimer() through a single compare_exchange (see
+    // VmExitDisposition). If the CAS fails, an idle stop already claimed StopRequested and owns the
+    // (soft) teardown, so this exit is expected - decline. If it succeeds, this is a spontaneous
+    // exit and we own the permanent teardown.
+    auto expected = VmExitDisposition::Active;
+    if (!m_vmExitDisposition.compare_exchange_strong(expected, VmExitDisposition::ExitClaimed))
     {
         WSL_LOG("WslcVmExitedDuringStop", TraceLoggingValue(m_id, "SessionId"));
         return;
